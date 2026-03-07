@@ -1,6 +1,6 @@
 {
     "name": "eslint-plugin-default-export-named",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "type": "module",
     "main": "index.js",
     "files": [
@@ -8,5 +8,8 @@
     ],
     "peerDependencies": {
         "eslint": ">=9.0.0"
+    },
+    "devDependencies": {
+        "eslint-plugin-default-export-named": "0.2.0"
     }
 }
