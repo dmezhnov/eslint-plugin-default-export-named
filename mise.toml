@@ -1,0 +1,6 @@
+[tools]
+bun = "1.3"
+
+[tasks.publish]
+description = "Publish a new version (interactive or explicit: mise run publish -- x.y.z)"
+run = "bun run scripts/publish.bun.ts"
