@@ -1,0 +1,15 @@
+{
+    "name": "@dmezhnov/eslint-plugin-default-export-named",
+    "version": "0.1.0",
+    "type": "module",
+    "main": "index.js",
+    "files": [
+        "index.js"
+    ],
+    "publishConfig": {
+        "registry": "https://npm.pkg.github.com"
+    },
+    "peerDependencies": {
+        "eslint": ">=9.0.0"
+    }
+}
