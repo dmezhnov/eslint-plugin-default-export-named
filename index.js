@@ -247,18 +247,45 @@ export const requireBarrelIndexRule = {
 
         // Collect re-exports only when processing the index file
         const reExports = new Map(); // source path (e.g. './Foo.bun') → { exportedName, node }
+        // Track: import X from './X.bun' → maps source path to local name
+        const importDefaults = new Map(); // source path → local name
+        // Track: export { X } (without source) → exported names
+        const localExportNames = new Set();
 
         return {
-            ExportNamedDeclaration(node) {
+            ImportDeclaration(node) {
                 if (!isCurrentIndex || !node.source) {
                     return;
                 }
-                const sourcePath = node.source.value;
+                // import X from './X.bun'
+                for (const spec of (node.specifiers || [])) {
+                    if (spec.type === 'ImportDefaultSpecifier') {
+                        importDefaults.set(node.source.value, spec.local.name);
+                    }
+                }
+            },
+
+            ExportNamedDeclaration(node) {
+                if (!isCurrentIndex) {
+                    return;
+                }
+                // Direct re-export: export { default as X } from './X.bun'
+                if (node.source) {
+                    const sourcePath = node.source.value;
+                    for (const spec of (node.specifiers || [])) {
+                        const exportedName = spec.exported.type === 'Identifier'
+                            ? spec.exported.name
+                            : spec.exported.value;
+                        reExports.set(sourcePath, { exportedName, node });
+                    }
+                    return;
+                }
+                // Local export: export { X, Y } — track names for import+export pattern
                 for (const spec of (node.specifiers || [])) {
                     const exportedName = spec.exported.type === 'Identifier'
                         ? spec.exported.name
                         : spec.exported.value;
-                    reExports.set(sourcePath, { exportedName, node });
+                    localExportNames.add(exportedName);
                 }
             },
 
@@ -300,6 +327,15 @@ export const requireBarrelIndexRule = {
                 // Check 2 & 3: only when we are processing the index file
                 if (!isCurrentIndex) {
                     return;
+                }
+
+                // Merge import+export pattern into reExports:
+                // If we have `import X from './X.bun'` and `export { X }`,
+                // treat it as a re-export of './X.bun' with name 'X'.
+                for (const [source, localName] of importDefaults) {
+                    if (!reExports.has(source) && localExportNames.has(localName)) {
+                        reExports.set(source, { exportedName: localName, node: programNode });
+                    }
                 }
 
                 // Build set of re-exported source paths
