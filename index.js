@@ -1,18 +1,20 @@
 /**
  * ESLint plugin: default-export-named
  *
- * Enforces bidirectional consistency between named exports and default object export:
- *
- * 1. If a file has `export default { a, b }`, every property must also be a named export.
- * 2. If a file has runtime named exports (class, function, const — not type/interface/re-export),
- *    it must have `export default { ... }` containing all of them.
- *
- * Type-only exports (export type, export interface) and re-exports (export { X } from '...')
- * are excluded because they cannot appear in a runtime object literal.
+ * Rules:
+ * 1. default-export-named — Enforces bidirectional consistency between named exports
+ *    and default object export.
+ * 2. require-barrel-index — Enforces that every directory has an index.ts barrel file
+ *    re-exporting all sibling modules with names matching file names.
  */
 
+import { readdirSync, existsSync } from 'node:fs';
+import { dirname, basename, join, resolve } from 'node:path';
+
+// ─── Rule: default-export-named ─────────────────────────────────────────────
+
 /** @type {import('eslint').Rule.RuleModule} */
-export const rule = {
+export const defaultExportNamedRule = {
     meta: {
         type: 'problem',
         docs: {
@@ -149,9 +151,198 @@ export const rule = {
     },
 };
 
+// Keep backward-compatible alias
+export const rule = defaultExportNamedRule;
+
+// ─── Rule: require-barrel-index ─────────────────────────────────────────────
+
+const DEFAULT_IGNORE = ['node_modules', '.git', '.trunk', '.github', '.claude'];
+
+// Module-level cache: directories already reported for missingIndex
+const checkedDirs = new Set();
+
+/**
+ * Strip file extension to get the import source path (without .ts/.js).
+ * Examples: "Foo.bun.ts" → "Foo.bun", "Bar.ts" → "Bar", "baz.js" → "baz"
+ */
+function stripTsJsExt(filename) {
+    return filename.replace(/\.[tj]sx?$/, '');
+}
+
+/**
+ * Strip all extensions to get the export name.
+ * Examples: "Foo.bun.ts" → "Foo", "Bar.ts" → "Bar", "baz.js" → "baz"
+ */
+function fileToExportName(filename) {
+    return filename.replace(/\.bun\.[tj]sx?$/, '').replace(/\.[tj]sx?$/, '');
+}
+
+/**
+ * Check if a filename is an index file.
+ */
+function isIndexFile(filename) {
+    return /^index\.[tj]sx?$/.test(filename);
+}
+
+/**
+ * Check if a filename is a source file we care about (not .d.ts, not test).
+ */
+function isSourceFile(filename) {
+    if (/\.d\.[tj]s$/.test(filename)) {
+        return false;
+    }
+    if (/\.(test|spec)\.[tj]sx?$/.test(filename)) {
+        return false;
+    }
+    return /\.[tj]sx?$/.test(filename);
+}
+
+/** @type {import('eslint').Rule.RuleModule} */
+export const requireBarrelIndexRule = {
+    meta: {
+        type: 'problem',
+        docs: {
+            description: 'Enforce that every directory has an index.ts barrel file re-exporting all sibling modules',
+        },
+        messages: {
+            missingIndex:
+                'Directory has source files but no index.ts barrel file.',
+            missingReExport:
+                '"{{ name }}" is not re-exported from index.',
+            wrongExportName:
+                '"{{ file }}" should be re-exported as "{{ expected }}", not "{{ actual }}".',
+        },
+        schema: [{
+            type: 'object',
+            properties: {
+                ignore: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Directory names to ignore',
+                },
+            },
+            additionalProperties: false,
+        }],
+    },
+    create(context) {
+        const options = context.options[0] || {};
+        const ignoreDirs = new Set([...DEFAULT_IGNORE, ...(options.ignore || [])]);
+
+        const filePath = context.filename || context.getFilename();
+        if (!filePath || filePath === '<input>' || filePath === '<text>') {
+            return {};
+        }
+
+        const dir = dirname(resolve(filePath));
+        const currentFileName = basename(filePath);
+        const isCurrentIndex = isIndexFile(currentFileName);
+
+        // Check if any ancestor directory is ignored
+        const dirParts = dir.split('/');
+        for (const part of dirParts) {
+            if (ignoreDirs.has(part)) {
+                return {};
+            }
+        }
+
+        // Collect re-exports only when processing the index file
+        const reExports = new Map(); // source path (e.g. './Foo.bun') → { exportedName, node }
+
+        return {
+            ExportNamedDeclaration(node) {
+                if (!isCurrentIndex || !node.source) {
+                    return;
+                }
+                const sourcePath = node.source.value;
+                for (const spec of (node.specifiers || [])) {
+                    const exportedName = spec.exported.type === 'Identifier'
+                        ? spec.exported.name
+                        : spec.exported.value;
+                    reExports.set(sourcePath, { exportedName, node });
+                }
+            },
+
+            ExportAllDeclaration(node) {
+                if (!isCurrentIndex || !node.source) {
+                    return;
+                }
+                // export * from './Foo.bun' — counts as a re-export (name check skipped)
+                reExports.set(node.source.value, { exportedName: null, node });
+            },
+
+            'Program:exit'(programNode) {
+                let siblings;
+                try {
+                    siblings = readdirSync(dir)
+                        .filter(f => isSourceFile(f) && !isIndexFile(f));
+                } catch {
+                    return;
+                }
+
+                if (siblings.length === 0) {
+                    return;
+                }
+
+                // Check 1: does index exist?
+                const hasIndex = existsSync(join(dir, 'index.ts')) || existsSync(join(dir, 'index.js'));
+
+                if (!hasIndex) {
+                    if (!checkedDirs.has(dir)) {
+                        checkedDirs.add(dir);
+                        context.report({
+                            node: programNode,
+                            messageId: 'missingIndex',
+                        });
+                    }
+                    return;
+                }
+
+                // Check 2 & 3: only when we are processing the index file
+                if (!isCurrentIndex) {
+                    return;
+                }
+
+                // Build set of re-exported source paths
+                const reExportedSources = new Set(reExports.keys());
+
+                for (const siblingFile of siblings) {
+                    const expectedSource = './' + stripTsJsExt(siblingFile);
+                    const expectedName = fileToExportName(siblingFile);
+
+                    if (!reExportedSources.has(expectedSource)) {
+                        context.report({
+                            node: programNode,
+                            messageId: 'missingReExport',
+                            data: { name: expectedName },
+                        });
+                        continue;
+                    }
+
+                    // Check export name matches file name
+                    const reExport = reExports.get(expectedSource);
+                    if (reExport.exportedName !== null && reExport.exportedName !== expectedName) {
+                        context.report({
+                            node: reExport.node,
+                            messageId: 'wrongExportName',
+                            data: {
+                                file: siblingFile,
+                                expected: expectedName,
+                                actual: reExport.exportedName,
+                            },
+                        });
+                    }
+                }
+            },
+        };
+    },
+};
+
+// ─── Plugin export ──────────────────────────────────────────────────────────
+
 /** @type {import('eslint').ESLint.Plugin} */
 export default {
     rules: {
-        'default-export-named': rule,
+        'default-export-named': defaultExportNamedRule,
+        'require-barrel-index': requireBarrelIndexRule,
     },
 };
