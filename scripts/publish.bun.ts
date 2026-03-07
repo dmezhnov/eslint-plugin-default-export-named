@@ -1,4 +1,4 @@
-// Publish a new version to GitHub Packages.
+// Publish a new version to npmjs.com via GitHub Actions.
 //
 // Usage:
 //   mise run publish            # interactive: choose patch/minor/major
@@ -74,13 +74,13 @@ async function main(): Promise<void> {
     const tag = `v${newVersion}`;
     console.log(`\n${oldVersion} → ${newVersion}`);
 
-    // Commit, tag, push
+    // Commit, tag, push — GitHub Actions will publish to npmjs.com
     await $`git add package.json`.quiet();
     await $`git commit -m ${tag}`.quiet();
     await $`git tag ${tag}`;
     await $`git push origin main ${tag}`;
 
-    console.log(`\nGitHub Actions will publish ${tag} to npm.`);
+    console.log(`\nGitHub Actions will publish ${tag} to npmjs.com.`);
 }
 
 main().catch((err) => {
