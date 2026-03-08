@@ -1,6 +1,6 @@
 {
     "name": "eslint-plugin-default-export-named",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "type": "module",
     "main": "index.js",
     "files": [
