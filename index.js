@@ -8,7 +8,7 @@
  *    re-exporting all sibling modules with names matching file names.
  */
 
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, basename, join, resolve } from 'node:path';
 
 // ─── Rule: default-export-named ─────────────────────────────────────────────
@@ -197,6 +197,47 @@ function isSourceFile(filename) {
     return /\.[tj]sx?$/.test(filename);
 }
 
+/**
+ * Find the nearest directory containing package.json, starting from dir and going up.
+ */
+function findPackageRoot(startDir) {
+    let dir = startDir;
+    while (dir !== dirname(dir)) {
+        if (existsSync(join(dir, 'package.json'))) {
+            return dir;
+        }
+        dir = dirname(dir);
+    }
+    return null;
+}
+
+/**
+ * Get immediate subdirectories of dir that have an index.ts/index.js.
+ */
+function getIndexedSubdirs(dir, ignoreDirs) {
+    try {
+        return readdirSync(dir).filter(name => {
+            if (ignoreDirs.has(name)) {
+                return false;
+            }
+            const fullPath = join(dir, name);
+            try {
+                if (!statSync(fullPath).isDirectory()) {
+                    return false;
+                }
+            } catch {
+                return false;
+            }
+            return existsSync(join(fullPath, 'index.ts')) || existsSync(join(fullPath, 'index.js'));
+        });
+    } catch {
+        return [];
+    }
+}
+
+// Module-level cache: root directories already checked
+const checkedRoots = new Set();
+
 /** @type {import('eslint').Rule.RuleModule} */
 export const requireBarrelIndexRule = {
     meta: {
@@ -211,6 +252,10 @@ export const requireBarrelIndexRule = {
                 '"{{ name }}" is not re-exported from index.',
             wrongExportName:
                 '"{{ file }}" should be re-exported as "{{ expected }}", not "{{ actual }}".',
+            missingRootIndex:
+                'Module root has subdirectories with index files but no root index.ts.',
+            missingRootReExport:
+                'Subdirectory "{{ name }}" is not re-exported from root index.',
         },
         schema: [{
             type: 'object',
@@ -220,6 +265,11 @@ export const requireBarrelIndexRule = {
                     items: { type: 'string' },
                     description: 'Directory names to ignore',
                 },
+                root: {
+                    type: 'boolean',
+                    description: 'Check that the module root (package.json directory) has an index.ts re-exporting all subdirectories',
+                    default: true,
+                },
             },
             additionalProperties: false,
         }],
@@ -227,6 +277,7 @@ export const requireBarrelIndexRule = {
     create(context) {
         const options = context.options[0] || {};
         const ignoreDirs = new Set([...DEFAULT_IGNORE, ...(options.ignore || [])]);
+        const checkRoot = options.root !== undefined ? options.root : true;
 
         const filePath = context.filename || context.getFilename();
         if (!filePath || filePath === '<input>' || filePath === '<text>') {
@@ -298,6 +349,46 @@ export const requireBarrelIndexRule = {
             },
 
             'Program:exit'(programNode) {
+                // Root check: verify module root has index.ts re-exporting subdirectories
+                if (checkRoot) {
+                    const rootDir = findPackageRoot(dir);
+                    if (rootDir && !checkedRoots.has(rootDir)) {
+                        const indexedSubdirs = getIndexedSubdirs(rootDir, ignoreDirs);
+                        if (indexedSubdirs.length > 0) {
+                            const rootIndexPath = join(rootDir, 'index.ts');
+                            const rootIndexPathJs = join(rootDir, 'index.js');
+                            const hasRootIndex = existsSync(rootIndexPath) || existsSync(rootIndexPathJs);
+
+                            if (!hasRootIndex) {
+                                checkedRoots.add(rootDir);
+                                context.report({
+                                    node: programNode,
+                                    messageId: 'missingRootIndex',
+                                });
+                            } else if (isCurrentIndex && dir === rootDir) {
+                                checkedRoots.add(rootDir);
+                                // Check that root index re-exports all subdirectories
+                                const reExportedSources = new Set([
+                                    ...reExports.keys(),
+                                    ...[...importDefaults.entries()]
+                                        .filter(([, name]) => localExportNames.has(name))
+                                        .map(([source]) => source),
+                                ]);
+                                for (const subdir of indexedSubdirs) {
+                                    const expectedSource = './' + subdir;
+                                    if (!reExportedSources.has(expectedSource)) {
+                                        context.report({
+                                            node: programNode,
+                                            messageId: 'missingRootReExport',
+                                            data: { name: subdir },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let siblings;
                 try {
                     siblings = readdirSync(dir)
