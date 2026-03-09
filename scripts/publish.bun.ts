@@ -88,6 +88,10 @@ async function main(): Promise<void> {
 
     console.log(`\n${oldVersion} → ${newVersion}`);
 
+    // Merge remote main to ensure we're up to date
+    await $`git fetch origin main`.quiet();
+    await $`git merge origin/main --no-edit`.quiet().nothrow();
+
     // Commit version bump, tag, and push to main
     await $`git add package.json`.quiet();
     await $`git commit -m ${tag}`.quiet();
