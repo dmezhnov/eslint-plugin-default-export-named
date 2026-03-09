@@ -7,8 +7,14 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import process from 'node:process';
 
 const { $ } = Bun;
+
+// Workaround for NixOS/Home Manager read-only SSH config permission errors.
+if (!process.env.GIT_SSH_COMMAND) {
+    process.env.GIT_SSH_COMMAND = 'ssh -F /dev/null';
+}
 
 function bumpVersion(current: string, type: 'patch' | 'minor' | 'major'): string {
     const [major, minor, patch] = current.split('.').map(Number) as [number, number, number];
@@ -51,10 +57,11 @@ async function chooseVersion(current: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-    // Check for uncommitted changes
+    // Save any uncommitted changes to draft first
     const status = (await $`git status --porcelain`.quiet().text()).trim();
     if (status) {
-        throw new Error('Working tree is dirty. Commit or stash changes first.');
+        console.log('Saving uncommitted changes to draft...');
+        await $`mise run save`;
     }
 
     // Read current version
@@ -68,17 +75,24 @@ async function main(): Promise<void> {
         ? (/^\d+\.\d+\.\d+$/.test(arg) ? arg : (() => { throw new Error(`Invalid version: "${arg}". Use x.y.z format.`); })())
         : await chooseVersion(oldVersion);
 
+    const tag = `v${newVersion}`;
+
+    // Check if tag already exists before making any changes
+    const existingTags = (await $`git tag -l ${tag}`.quiet().text()).trim();
+    if (existingTags) {
+        throw new Error(`Tag ${tag} already exists. Delete it first or choose a different version.`);
+    }
+
     pkg.version = newVersion;
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 4) + '\n');
 
-    const tag = `v${newVersion}`;
     console.log(`\n${oldVersion} → ${newVersion}`);
 
-    // Commit, tag, push — GitHub Actions will publish to npmjs.com
+    // Commit version bump, tag, and push to main
     await $`git add package.json`.quiet();
     await $`git commit -m ${tag}`.quiet();
     await $`git tag ${tag}`;
-    await $`git push origin main ${tag}`;
+    await $`git push origin HEAD:main ${tag}`;
 
     console.log(`\nGitHub Actions will publish ${tag} to npmjs.com.`);
 }
