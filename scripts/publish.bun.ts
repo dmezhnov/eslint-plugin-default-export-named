@@ -16,6 +16,7 @@ if (!process.env.GIT_SSH_COMMAND) {
     process.env.GIT_SSH_COMMAND = 'ssh -F /dev/null';
 }
 
+/** Compute the next version string for the given bump type. */
 function bumpVersion(current: string, type: 'patch' | 'minor' | 'major'): string {
     const [major, minor, patch] = current.split('.').map(Number) as [number, number, number];
     switch (type) {
@@ -25,6 +26,7 @@ function bumpVersion(current: string, type: 'patch' | 'minor' | 'major'): string
     }
 }
 
+/** Prompt the user for input via readline and return the trimmed answer. */
 async function prompt(question: string): Promise<string> {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     return new Promise((resolve) => {
@@ -35,6 +37,7 @@ async function prompt(question: string): Promise<string> {
     });
 }
 
+/** Display version options and prompt the user to choose patch/minor/major. */
 async function chooseVersion(current: string): Promise<string> {
     const patch = bumpVersion(current, 'patch');
     const minor = bumpVersion(current, 'minor');
@@ -56,12 +59,29 @@ async function chooseVersion(current: string): Promise<string> {
     }
 }
 
+/** Merge draft into main, bump version, tag, and push. */
 async function main(): Promise<void> {
-    // Save any uncommitted changes to draft first
-    const status = (await $`git status --porcelain`.quiet().text()).trim();
-    if (status) {
-        console.log('Saving uncommitted changes to draft...');
-        await $`mise run save`;
+    const MAIN_BRANCH = 'main';
+    const DRAFT_BRANCH = 'draft';
+
+    // Always save current work into draft first.
+    console.log(`Saving changes to '${DRAFT_BRANCH}'...`);
+    await $`mise run save`;
+
+    // Save returns to the original branch with working changes restored.
+    // Discard the working-tree copies so the merge can proceed cleanly —
+    // the same changes are already committed on the draft branch.
+    const currentBranch = (await $`git rev-parse --abbrev-ref HEAD`.quiet().text()).trim();
+    if (currentBranch !== MAIN_BRANCH) {
+        await $`git checkout ${MAIN_BRANCH}`.quiet();
+    }
+    await $`git checkout -- .`.quiet().nothrow();
+    await $`git clean -fd`.quiet().nothrow();
+    await $`git fetch origin ${MAIN_BRANCH}`.quiet();
+    await $`git pull --ff-only origin ${MAIN_BRANCH}`.quiet();
+    const merge = await $`git merge --no-edit ${DRAFT_BRANCH}`.quiet().nothrow();
+    if (merge.exitCode) {
+        throw new Error(`Failed to merge '${DRAFT_BRANCH}' into '${MAIN_BRANCH}'. Resolve conflicts and retry.`);
     }
 
     // Read current version
@@ -76,11 +96,9 @@ async function main(): Promise<void> {
         : await chooseVersion(oldVersion);
 
     const tag = `v${newVersion}`;
-
-    // Check if tag already exists before making any changes
     const existingTags = (await $`git tag -l ${tag}`.quiet().text()).trim();
     if (existingTags) {
-        throw new Error(`Tag ${tag} already exists. Delete it first or choose a different version.`);
+        throw new Error(`Tag ${tag} already exists. Choose a different version.`);
     }
 
     pkg.version = newVersion;
@@ -88,15 +106,16 @@ async function main(): Promise<void> {
 
     console.log(`\n${oldVersion} → ${newVersion}`);
 
-    // Merge remote main to ensure we're up to date
-    await $`git fetch origin main`.quiet();
-    await $`git merge origin/main --no-edit`.quiet().nothrow();
-
-    // Commit version bump, tag, and push to main
+    // Commit, push main, then push tag.
     await $`git add package.json`.quiet();
     await $`git commit -m ${tag}`.quiet();
     await $`git tag ${tag}`;
-    await $`git push origin HEAD:main ${tag}`;
+    await $`git push origin ${MAIN_BRANCH}`;
+    await $`git push origin ${tag}`;
+
+    // Sync draft branch to main so the next save starts from a clean base.
+    await $`git branch -f ${DRAFT_BRANCH} ${MAIN_BRANCH}`.quiet();
+    await $`git push --force-with-lease origin ${DRAFT_BRANCH}`.quiet();
 
     console.log(`\nGitHub Actions will publish ${tag} to npmjs.com.`);
 }
